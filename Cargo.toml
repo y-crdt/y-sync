@@ -1,9 +1,9 @@
 [package]
 name = "y-sync"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Yrs synchronization protocol"
-license = "MIT"
+license-file = "LICENSE"
 authors = ["Bartosz Sypytkowski <b.sypytkowski@gmail.com>"]
 keywords = ["crdt", "yrs", "y-sync"]
 homepage = "https://github.com/y-crdt/y-sync/"
@@ -13,8 +13,8 @@ readme = "./README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lib0 = "0.13"
-yrs = "0.13"
+lib0 = ">= 0.16"
+yrs = ">= 0.16"
 thiserror = "1.0"
 
 [dev-dependencies]
