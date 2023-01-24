@@ -67,7 +67,7 @@ impl Awareness {
 
     /// Returns a globally unique client ID of an underlying [Doc].
     pub fn client_id(&self) -> ClientID {
-        self.doc.client_id
+        self.doc.client_id()
     }
 
     /// Returns a state map of all of the clients tracked by current [Awareness] instance. Those
@@ -79,7 +79,7 @@ impl Awareness {
 
     /// Returns a JSON string state representation of a current [Awareness] instance.
     pub fn local_state(&self) -> Option<&str> {
-        Some(self.states.get(&self.doc.client_id)?.as_str())
+        Some(self.states.get(&self.doc.client_id())?.as_str())
     }
 
     /// Sets a current [Awareness] instance state to a corresponding JSON string. This state will
@@ -87,7 +87,7 @@ impl Awareness {
     /// to be emitted if current instance was created using [Awareness::with_observer] method.
     ///
     pub fn set_local_state<S: Into<String>>(&mut self, json: S) {
-        let client_id = self.doc.client_id;
+        let client_id = self.doc.client_id();
         self.update_meta(client_id);
         let new: String = json.into();
         match self.states.entry(client_id) {
@@ -123,7 +123,7 @@ impl Awareness {
     /// Clears out a state of a current client (see: [Awareness::client_id]),
     /// effectively marking it as disconnected.
     pub fn clean_local_state(&mut self) {
-        let client_id = self.doc.client_id;
+        let client_id = self.doc.client_id();
         self.remove_state(client_id);
     }
 
@@ -195,7 +195,7 @@ impl Awareness {
                     if is_new || is_removed {
                         if is_null {
                             // never let a remote client remove this local state
-                            if client_id == self.doc.client_id
+                            if client_id == self.doc.client_id()
                                 && self.states.get(&client_id).is_some()
                             {
                                 // remote client removed the local state. Do not remote state. Broadcast a message indicating
