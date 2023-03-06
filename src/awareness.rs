@@ -443,20 +443,20 @@ mod test {
         });
 
         local.set_local_state("{x:3}");
-        let mut e_local = update(&mut o_local, &local, &mut remote)?;
+        let _e_local = update(&mut o_local, &local, &mut remote)?;
         assert_eq!(remote.clients()[&1], "{x:3}");
         assert_eq!(remote.meta[&1].clock, 1);
         assert_eq!(o_remote.try_recv()?.added, &[1]);
 
         local.set_local_state("{x:4}");
-        e_local = update(&mut o_local, &local, &mut remote)?;
+        let e_local = update(&mut o_local, &local, &mut remote)?;
         let e_remote = o_remote.try_recv()?;
         assert_eq!(remote.clients()[&1], "{x:4}");
         assert_eq!(e_remote, Event::new(vec![], vec![1], vec![]));
         assert_eq!(e_remote, e_local);
 
         local.clean_local_state();
-        e_local = update(&mut o_local, &local, &mut remote)?;
+        let e_local = update(&mut o_local, &local, &mut remote)?;
         let e_remote = o_remote.try_recv()?;
         assert_eq!(e_remote.removed.len(), 1);
         assert_eq!(local.clients().get(&1), None);
