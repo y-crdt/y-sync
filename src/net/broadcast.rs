@@ -1,7 +1,8 @@
 use crate::awareness;
 use crate::awareness::{Awareness, Event};
+use crate::net::conn::Connection;
 use crate::sync::{Error, Message, MSG_SYNC, MSG_SYNC_UPDATE};
-use futures_util::SinkExt;
+use futures_util::{Sink, SinkExt};
 use lib0::encoding::Write;
 use std::sync::Arc;
 use tokio::sync::broadcast::{channel, Receiver, Sender};
@@ -76,15 +77,16 @@ impl BroadcastGroup {
     /// Subscribes a new BroadcastGroup gossip receiver. Returned join handle serves as a
     /// subscription handler - dropping it will unsubscribe receiver from the group. It can also
     /// finish abruptly if subscriber has been closed or couldn't propagate gossips for any reason.
-    pub fn join<S, E>(&self, mut subscriber: S) -> JoinHandle<Result<(), Error>>
+    pub fn join<I, O, E>(&self, mut conn: Arc<Connection<I, O>>) -> JoinHandle<Result<(), Error>>
     where
-        S: futures_util::sink::Sink<Vec<u8>, Error = E> + Send + Sync + Unpin + 'static,
-        E: Into<Error>,
+        I: Sync + Send + 'static,
+        O: SinkExt<Vec<u8>, Error = E> + Send + Sync + Unpin + 'static,
+        E: Into<Error> + Send + Sync,
     {
         let mut receiver = self.sender.subscribe();
         tokio::spawn(async move {
             while let Ok(msg) = receiver.recv().await {
-                if let Err(e) = subscriber.send(msg).await {
+                if let Err(e) = conn.send(msg).await {
                     return Err(e.into());
                 }
             }

@@ -3,6 +3,7 @@ use crate::sync::{DefaultProtocol, Error, Message, MessageReader, Protocol, Sync
 use futures_util::sink::SinkExt;
 use futures_util::StreamExt;
 use lib0::decoding::Cursor;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -20,13 +21,32 @@ use yrs::Update;
 /// This connection implements Future pattern and can be awaited upon in order for a caller to
 /// recognize whether underlying websocket connection has been finished gracefully or abruptly.
 #[derive(Debug)]
-pub struct ConnHandler<I, O> {
+pub struct Connection<I, O> {
     processing_loop: JoinHandle<Result<(), Error>>,
     inbox: Arc<Mutex<O>>,
     _stream: PhantomData<I>,
 }
 
-impl<I, O, E> ConnHandler<I, O>
+impl<I, O, E> Connection<I, O>
+where
+    O: SinkExt<Vec<u8>, Error = E> + Send + Sync + Unpin + 'static,
+    E: Into<Error> + Send + Sync,
+{
+    pub async fn send(&self, msg: Vec<u8>) -> Result<(), Error> {
+        let mut inbox = self.inbox.lock().await;
+        match inbox.send(msg).await {
+            Ok(_) => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub async fn close(self) -> Result<(), E> {
+        let mut inbox = self.inbox.lock().await;
+        inbox.close().await
+    }
+}
+
+impl<I, O, E> Connection<I, O>
 where
     I: StreamExt<Item = Result<Vec<u8>, E>> + Send + Sync + Unpin + 'static,
     O: SinkExt<Vec<u8>, Error = E> + Send + Sync + Unpin + 'static,
@@ -53,8 +73,9 @@ where
         P: Protocol + Send + Sync + 'static,
     {
         let (sink, mut source) = socket;
-        let mut sink = Arc::new(Mutex::new(sink));
+        let sink = Arc::new(Mutex::new(sink));
         let inbox = sink.clone();
+        let loop_sink = Arc::downgrade(&sink);
         let processing_loop: JoinHandle<Result<(), Error>> = spawn(async move {
             // at the beginning send SyncStep1 and AwarenessUpdate
             let payload = {
@@ -64,20 +85,28 @@ where
                 encoder.to_vec()
             };
             if !payload.is_empty() {
-                let mut s = sink.lock().await;
-                if let Err(e) = s.send(payload).await {
-                    return Err(e.into());
+                if let Some(sink) = loop_sink.upgrade() {
+                    let mut s = sink.lock().await;
+                    if let Err(e) = s.send(payload).await {
+                        return Err(e.into());
+                    }
+                } else {
+                    return Ok(()); // parent ConnHandler has been dropped
                 }
             }
 
             while let Some(input) = source.next().await {
                 match input {
                     Ok(data) => {
-                        match Self::process(&protocol, &awareness, &mut sink, data).await {
-                            Ok(()) => { /* continue */ }
-                            Err(e) => {
-                                return Err(e);
+                        if let Some(mut sink) = loop_sink.upgrade() {
+                            match Self::process(&protocol, &awareness, &mut sink, data).await {
+                                Ok(()) => { /* continue */ }
+                                Err(e) => {
+                                    return Err(e);
+                                }
                             }
+                        } else {
+                            return Ok(()); // parent ConnHandler has been dropped
                         }
                     }
                     Err(e) => return Err(e.into()),
@@ -86,17 +115,11 @@ where
 
             Ok(())
         });
-        ConnHandler {
+        Connection {
             processing_loop,
             inbox,
             _stream: PhantomData::default(),
         }
-    }
-
-    /// Returns a reference to a [ConnInbox] that can be used to send data through an underlying
-    /// websocket connection.
-    pub fn inbox(&self) -> &Arc<Mutex<O>> {
-        &self.inbox
     }
 
     async fn process<P: Protocol>(
@@ -120,9 +143,9 @@ where
     }
 }
 
-impl<I, O> Unpin for ConnHandler<I, O> {}
+impl<I, O> Unpin for Connection<I, O> {}
 
-impl<I, O> core::future::Future for ConnHandler<I, O> {
+impl<I, O> Future for Connection<I, O> {
     type Output = Result<(), Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
