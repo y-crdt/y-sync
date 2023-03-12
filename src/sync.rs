@@ -291,10 +291,16 @@ pub enum Error {
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
-//#[cfg(feature = "net")]
+#[cfg(feature = "net")]
 impl From<tokio::task::JoinError> for Error {
     fn from(value: tokio::task::JoinError) -> Self {
         Error::Other(value.into())
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(value: std::io::Error) -> Self {
+        Error::DecodingError(lib0::error::Error::IO(value))
     }
 }
 

@@ -1,20 +1,22 @@
 use crate::awareness;
 use crate::awareness::{Awareness, Event};
-use crate::net::conn::Connection;
-use crate::sync::{Error, Message, MSG_SYNC, MSG_SYNC_UPDATE};
-use futures_util::{Sink, SinkExt};
+use crate::net::conn::handle_msg;
+use crate::sync::{DefaultProtocol, Error, Message, Protocol, MSG_SYNC, MSG_SYNC_UPDATE};
+use futures_util::{SinkExt, StreamExt};
 use lib0::encoding::Write;
 use std::sync::Arc;
+use tokio::sync::broadcast::error::SendError;
 use tokio::sync::broadcast::{channel, Receiver, Sender};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
+use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::UpdateSubscription;
 
 /// A broadcast group can be used to propagate updates produced by yrs [yrs::Doc] and [Awareness]
 /// structures in a binary form that conforms to a y-sync protocol.
 ///
-/// New receivers can subscribe to a broadcasting group via [BroadcastGroup::join] method.
+/// New receivers can subscribe to a broadcasting group via [BroadcastGroup::subscribe] method.
 pub struct BroadcastGroup {
     awareness_sub: awareness::Subscription<Event>,
     doc_sub: UpdateSubscription,
@@ -27,10 +29,10 @@ unsafe impl Send for BroadcastGroup {}
 unsafe impl Sync for BroadcastGroup {}
 
 impl BroadcastGroup {
-    pub async fn open(awareness_ref: Arc<RwLock<Awareness>>, channel_capacity: usize) -> Self {
+    pub async fn open(awareness: Arc<RwLock<Awareness>>, channel_capacity: usize) -> Self {
         let (sender, receiver) = channel(channel_capacity);
         let (doc_sub, awareness_sub) = {
-            let mut awareness = awareness_ref.write().await;
+            let mut awareness = awareness.write().await;
             let sink = sender.clone();
             let doc_sub = awareness
                 .doc_mut()
@@ -41,8 +43,8 @@ impl BroadcastGroup {
                     encoder.write_var(MSG_SYNC_UPDATE);
                     encoder.write_buf(&u.update);
                     let msg = encoder.to_vec();
-                    if let Err(e) = sink.send(msg) {
-                        panic!("couldn't broadcast the document update: {}", e);
+                    if let Err(_e) = sink.send(msg) {
+                        // current broadcast group is being closed
                     }
                 })
                 .unwrap();
@@ -58,15 +60,15 @@ impl BroadcastGroup {
 
                 if let Ok(u) = awareness.update_with_clients(changed) {
                     let msg = Message::Awareness(u).encode_v1();
-                    if let Err(e) = sink.send(msg) {
-                        panic!("couldn't broadcast awareness update: {}", e)
+                    if let Err(_e) = sink.send(msg) {
+                        // current broadcast group is being closed
                     }
                 }
             });
             (doc_sub, awareness_sub)
         };
         BroadcastGroup {
-            awareness_ref,
+            awareness_ref: awareness,
             sender,
             receiver,
             awareness_sub,
@@ -74,23 +76,197 @@ impl BroadcastGroup {
         }
     }
 
+    pub fn awareness(&self) -> &Arc<RwLock<Awareness>> {
+        &self.awareness_ref
+    }
+
+    /// Broadcasts user message to all active subscribers. Returns error if message could not have
+    /// been broadcasted.
+    pub fn broadcast(&self, msg: Vec<u8>) -> Result<(), SendError<Vec<u8>>> {
+        self.sender.send(msg)?;
+        Ok(())
+    }
+
+    pub fn subscribe<Sink, Stream, E>(&self, sink: Arc<Mutex<Sink>>, stream: Stream) -> Subscription
+    where
+        Sink: SinkExt<Vec<u8>> + Send + Sync + Unpin + 'static,
+        Stream: StreamExt<Item = Result<Vec<u8>, E>> + Send + Sync + Unpin + 'static,
+        <Sink as futures_util::Sink<Vec<u8>>>::Error: std::error::Error + Send + Sync,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.subscribe_with(sink, stream, DefaultProtocol)
+    }
+
     /// Subscribes a new BroadcastGroup gossip receiver. Returned join handle serves as a
     /// subscription handler - dropping it will unsubscribe receiver from the group. It can also
     /// finish abruptly if subscriber has been closed or couldn't propagate gossips for any reason.
-    pub fn join<I, O, E>(&self, mut conn: Arc<Connection<I, O>>) -> JoinHandle<Result<(), Error>>
+    pub fn subscribe_with<Sink, Stream, E, P>(
+        &self,
+        sink: Arc<Mutex<Sink>>,
+        mut stream: Stream,
+        protocol: P,
+    ) -> Subscription
     where
-        I: Sync + Send + 'static,
-        O: SinkExt<Vec<u8>, Error = E> + Send + Sync + Unpin + 'static,
-        E: Into<Error> + Send + Sync,
+        Sink: SinkExt<Vec<u8>> + Send + Sync + Unpin + 'static,
+        Stream: StreamExt<Item = Result<Vec<u8>, E>> + Send + Sync + Unpin + 'static,
+        <Sink as futures_util::Sink<Vec<u8>>>::Error: std::error::Error + Send + Sync,
+        E: std::error::Error + Send + Sync + 'static,
+        P: Protocol + Send + Sync + 'static,
     {
-        let mut receiver = self.sender.subscribe();
-        tokio::spawn(async move {
-            while let Ok(msg) = receiver.recv().await {
-                if let Err(e) = conn.send(msg).await {
-                    return Err(e.into());
+        let sink_task = {
+            let sink = sink.clone();
+            let mut receiver = self.sender.subscribe();
+            tokio::spawn(async move {
+                while let Ok(msg) = receiver.recv().await {
+                    let mut sink = sink.lock().await;
+                    if let Err(e) = sink.send(msg).await {
+                        println!("broadcast failed to sent sync message");
+                        return Err(Error::Other(Box::new(e)));
+                    }
                 }
+                Ok(())
+            })
+        };
+        let stream_task = {
+            let awareness = self.awareness().clone();
+            tokio::spawn(async move {
+                while let Some(res) = stream.next().await {
+                    let msg = Message::decode_v1(&res.map_err(|e| Error::Other(Box::new(e)))?)?;
+                    let reply = handle_msg(&protocol, &awareness, msg).await?;
+                    match reply {
+                        None => {}
+                        Some(reply) => {
+                            let mut sink = sink.lock().await;
+                            sink.send(reply.encode_v1())
+                                .await
+                                .map_err(|e| Error::Other(Box::new(e)))?;
+                        }
+                    }
+                }
+                Ok(())
+            })
+        };
+
+        Subscription {
+            sink_task,
+            stream_task,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Subscription {
+    sink_task: JoinHandle<Result<(), Error>>,
+    stream_task: JoinHandle<Result<(), Error>>,
+}
+
+#[cfg(test)]
+mod test {
+    use crate::awareness::{Awareness, AwarenessUpdate, AwarenessUpdateEntry};
+    use crate::net::broadcast::BroadcastGroup;
+    use crate::sync::{Error, Message, SyncMessage};
+    use futures_util::{ready, SinkExt, StreamExt};
+    use std::collections::HashMap;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use tokio::sync::{Mutex, RwLock};
+    use tokio_util::sync::PollSender;
+    use yrs::updates::decoder::Decode;
+    use yrs::updates::encoder::Encode;
+    use yrs::{Doc, StateVector, Text, Transact};
+
+    #[derive(Debug)]
+    pub struct ReceiverStream<T> {
+        inner: tokio::sync::mpsc::Receiver<T>,
+    }
+
+    impl<T> ReceiverStream<T> {
+        /// Create a new `ReceiverStream`.
+        pub fn new(recv: tokio::sync::mpsc::Receiver<T>) -> Self {
+            Self { inner: recv }
+        }
+    }
+
+    impl<T> futures_util::Stream for ReceiverStream<T> {
+        type Item = Result<T, Error>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match ready!(self.inner.poll_recv(cx)) {
+                None => Poll::Ready(None),
+                Some(v) => Poll::Ready(Some(Ok(v))),
             }
-            Ok(())
-        })
+        }
+    }
+
+    fn test_channel(capacity: usize) -> (PollSender<Vec<u8>>, ReceiverStream<Vec<u8>>) {
+        let (s, r) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let s = PollSender::new(s);
+        let r = ReceiverStream::new(r);
+        (s, r)
+    }
+
+    #[tokio::test]
+    async fn broadcast_changes() -> Result<(), Box<dyn std::error::Error>> {
+        let doc = Doc::with_client_id(1);
+        let text = doc.get_or_insert_text("test");
+        let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
+        let group = BroadcastGroup::open(awareness.clone(), 1).await;
+
+        let (server_sender, mut client_receiver) = test_channel(1);
+        let (mut client_sender, server_receiver) = test_channel(1);
+        let _sub1 = group.subscribe(Arc::new(Mutex::new(server_sender)), server_receiver);
+
+        // check update propagation
+        {
+            let a = awareness.write().await;
+            text.push(&mut a.doc().transact_mut(), "a");
+        }
+        let msg = client_receiver.next().await;
+        let msg = msg.map(|x| Message::decode_v1(&x.unwrap()).unwrap());
+        assert_eq!(
+            msg,
+            Some(Message::Sync(SyncMessage::Update(vec![
+                1, 1, 1, 0, 4, 1, 4, 116, 101, 115, 116, 1, 97, 0,
+            ])))
+        );
+
+        // check awareness update propagation
+        {
+            let mut a = awareness.write().await;
+            a.set_local_state(r#"{"key":"value"}"#)
+        }
+
+        let msg = client_receiver.next().await;
+        let msg = msg.map(|x| Message::decode_v1(&x.unwrap()).unwrap());
+        assert_eq!(
+            msg,
+            Some(Message::Awareness(AwarenessUpdate {
+                clients: HashMap::from([(
+                    1,
+                    AwarenessUpdateEntry {
+                        clock: 1,
+                        json: r#"{"key":"value"}"#.to_string(),
+                    },
+                )]),
+            }))
+        );
+
+        // check sync state request/response
+        {
+            client_sender
+                .send(Message::Sync(SyncMessage::SyncStep1(StateVector::default())).encode_v1())
+                .await?;
+            let msg = client_receiver.next().await;
+            let msg = msg.map(|x| Message::decode_v1(&x.unwrap()).unwrap());
+            assert_eq!(
+                msg,
+                Some(Message::Sync(SyncMessage::SyncStep2(vec![
+                    1, 1, 1, 0, 4, 1, 4, 116, 101, 115, 116, 1, 97, 0,
+                ])))
+            );
+        }
+
+        Ok(())
     }
 }

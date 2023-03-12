@@ -1,5 +1,5 @@
 pub mod awareness;
 pub mod sync;
 
-//#[cfg(feature = "net")]
+#[cfg(feature = "net")]
 pub mod net;
