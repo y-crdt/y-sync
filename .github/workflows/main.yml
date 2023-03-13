@@ -28,7 +28,7 @@ jobs:
           override: true
 
       - name: build default
-        run: cargo build --verbose --release --features net
+        run: cargo build --verbose --release
 
   test-linux:
     runs-on: ubuntu-latest
