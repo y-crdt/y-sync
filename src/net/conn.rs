@@ -67,6 +67,7 @@ where
         Self::with_protocol(awareness, sink, stream, DefaultProtocol)
     }
 
+    /// Returns an underlying [Awareness] structure, that contains client state of that connection.
     pub fn awareness(&self) -> &Arc<RwLock<Awareness>> {
         &self.awareness
     }
@@ -320,7 +321,7 @@ mod test {
         let doc = Doc::with_client_id(1);
         let text = doc.get_or_insert_text("test");
         let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
-        let bcast = BroadcastGroup::open(awareness.clone(), 10).await;
+        let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
         let server = start_server(server_addr.clone(), bcast).await?;
 
         let doc = Doc::new();
@@ -354,7 +355,7 @@ mod test {
         text.push(&mut doc.transact_mut(), "abc");
 
         let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
-        let bcast = BroadcastGroup::open(awareness.clone(), 10).await;
+        let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
         let server = start_server(server_addr.clone(), bcast).await?;
 
         let doc = Doc::new();
@@ -381,7 +382,7 @@ mod test {
         let text = doc.get_or_insert_text("test");
 
         let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
-        let bcast = BroadcastGroup::open(awareness.clone(), 10).await;
+        let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
         let server = start_server(server_addr.clone(), bcast).await?;
 
         let d1 = Doc::with_client_id(2);
@@ -435,7 +436,7 @@ mod test {
         let text = doc.get_or_insert_text("test");
 
         let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
-        let bcast = BroadcastGroup::open(awareness.clone(), 10).await;
+        let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
         let server = start_server(server_addr.clone(), bcast).await?;
 
         let d1 = Doc::with_client_id(2);

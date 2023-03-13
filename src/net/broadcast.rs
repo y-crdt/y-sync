@@ -5,6 +5,7 @@ use crate::sync::{DefaultProtocol, Error, Message, Protocol, MSG_SYNC, MSG_SYNC_
 use futures_util::{SinkExt, StreamExt};
 use lib0::encoding::Write;
 use std::sync::Arc;
+use tokio::select;
 use tokio::sync::broadcast::error::SendError;
 use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
@@ -29,8 +30,14 @@ unsafe impl Send for BroadcastGroup {}
 unsafe impl Sync for BroadcastGroup {}
 
 impl BroadcastGroup {
-    pub async fn open(awareness: Arc<RwLock<Awareness>>, channel_capacity: usize) -> Self {
-        let (sender, receiver) = channel(channel_capacity);
+    /// Creates a new [BroadcastGroup] over a provided `awareness` instance. All changes triggered
+    /// by this awareness structure or its underlying document will be propagated to all subscribers
+    /// which have been registered via [BroadcastGroup::subscribe] method.
+    ///
+    /// The overflow of the incoming events that needs to be propagates will be buffered up to a
+    /// provided `buffer_capacity` size.
+    pub async fn new(awareness: Arc<RwLock<Awareness>>, buffer_capacity: usize) -> Self {
+        let (sender, receiver) = channel(buffer_capacity);
         let (doc_sub, awareness_sub) = {
             let mut awareness = awareness.write().await;
             let sink = sender.clone();
@@ -76,6 +83,7 @@ impl BroadcastGroup {
         }
     }
 
+    /// Returns a reference to an underlying [Awareness] instance.
     pub fn awareness(&self) -> &Arc<RwLock<Awareness>> {
         &self.awareness_ref
     }
@@ -87,6 +95,12 @@ impl BroadcastGroup {
         Ok(())
     }
 
+    /// Subscribes a new connection - represented by `sink`/`stream` pair implementing a futures
+    /// Sink and Stream protocols - to a current broadcast group.
+    ///
+    /// Returns a subscription structure, which can be dropped in order to unsubscribe or awaited
+    /// via [Subscription::completed] method in order to complete of its own volition (due to
+    /// an internal connection error or closed connection).
     pub fn subscribe<Sink, Stream, E>(&self, sink: Arc<Mutex<Sink>>, stream: Stream) -> Subscription
     where
         Sink: SinkExt<Vec<u8>> + Send + Sync + Unpin + 'static,
@@ -97,9 +111,15 @@ impl BroadcastGroup {
         self.subscribe_with(sink, stream, DefaultProtocol)
     }
 
-    /// Subscribes a new BroadcastGroup gossip receiver. Returned join handle serves as a
-    /// subscription handler - dropping it will unsubscribe receiver from the group. It can also
-    /// finish abruptly if subscriber has been closed or couldn't propagate gossips for any reason.
+    /// Subscribes a new connection - represented by `sink`/`stream` pair implementing a futures
+    /// Sink and Stream protocols - to a current broadcast group.
+    ///
+    /// Returns a subscription structure, which can be dropped in order to unsubscribe or awaited
+    /// via [Subscription::completed] method in order to complete of its own volition (due to
+    /// an internal connection error or closed connection).
+    ///
+    /// Unlike [BroadcastGroup::subscribe], this method can take [Protocol] parameter that allows to
+    /// customize the y-sync protocol behavior.
     pub fn subscribe_with<Sink, Stream, E, P>(
         &self,
         sink: Arc<Mutex<Sink>>,
@@ -154,10 +174,28 @@ impl BroadcastGroup {
     }
 }
 
+/// A subscription structure returned from [BroadcastGroup::subscribe], which represents a
+/// subscribed connection. It can be dropped in order to unsubscribe or awaited via
+/// [Subscription::completed] method in order to complete of its own volition (due to an internal
+/// connection error or closed connection).
 #[derive(Debug)]
 pub struct Subscription {
     sink_task: JoinHandle<Result<(), Error>>,
     stream_task: JoinHandle<Result<(), Error>>,
+}
+
+impl Subscription {
+    /// Consumes current subscription, waiting for it to complete. If an underlying connection was
+    /// closed because of failure, an error which caused it to happen will be returned.
+    ///
+    /// This method doesn't invoke close procedure. If you need that, drop current subscription instead.
+    pub async fn completed(self) -> Result<(), Error> {
+        let res = select! {
+            r1 = self.sink_task => r1?,
+            r2 = self.stream_task => r2?,
+        };
+        res
+    }
 }
 
 #[cfg(test)]
@@ -211,7 +249,7 @@ mod test {
         let doc = Doc::with_client_id(1);
         let text = doc.get_or_insert_text("test");
         let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
-        let group = BroadcastGroup::open(awareness.clone(), 1).await;
+        let group = BroadcastGroup::new(awareness.clone(), 1).await;
 
         let (server_sender, mut client_receiver) = test_channel(1);
         let (mut client_sender, server_receiver) = test_channel(1);

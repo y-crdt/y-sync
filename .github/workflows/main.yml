@@ -38,4 +38,4 @@ jobs:
         uses: actions/checkout@v2
 
       - name: test
-        run: cargo test --release --features net
+        run: cargo test --release --features=net
