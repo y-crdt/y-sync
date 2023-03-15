@@ -5,3 +5,7 @@ This crate comes with the default implementation of [Yjs/Yrs synchronization pro
 It also implements [awareness protocol](https://docs.yjs.dev/api/about-awareness) and corresponding `Awareness` structure.
 
 The implementation just like the protocol itself is flexible and can be extended by custom implementation of `Protocol` trait. If that's not necessary, the `DefaultProtocol` is provided.
+
+## Sponsors
+
+[![NLNET](https://nlnet.nl/image/logo_nlnet.svg)](https://nlnet.nl/)
