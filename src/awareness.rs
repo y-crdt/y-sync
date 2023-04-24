@@ -1,14 +1,13 @@
-use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::Formatter;
-use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
 use yrs::block::ClientID;
 use yrs::updates::decoder::{Decode, Decoder};
 use yrs::updates::encoder::{Encode, Encoder};
-use yrs::Doc;
+use yrs::{Doc, Observer, Subscription};
 
 const NULL_STR: &str = "null";
 
@@ -28,7 +27,7 @@ pub struct Awareness {
     doc: Doc,
     states: HashMap<ClientID, String>,
     meta: HashMap<ClientID, MetaClientState>,
-    on_update: Option<EventHandler<Event>>,
+    on_update: Option<Observer<Arc<dyn Fn(&Awareness, &Event) -> () + 'static>>>,
 }
 
 unsafe impl Send for Awareness {}
@@ -48,12 +47,12 @@ impl Awareness {
     }
 
     /// Returns a channel receiver for an incoming awareness events. This channel can be cloned.
-    pub fn on_update<F>(&mut self, f: F) -> Subscription<Event>
+    pub fn on_update<F>(&mut self, f: F) -> UpdateSubscription
     where
         F: Fn(&Awareness, &Event) -> () + 'static,
     {
-        let eh = self.on_update.get_or_insert_with(EventHandler::default);
-        eh.subscribe(f)
+        let eh = self.on_update.get_or_insert_with(Observer::default);
+        eh.subscribe(Arc::new(f))
     }
 
     /// Returns a read-only reference to an underlying [Doc].
@@ -95,13 +94,19 @@ impl Awareness {
             Entry::Occupied(mut e) => {
                 e.insert(new);
                 if let Some(eh) = self.on_update.as_ref() {
-                    eh.trigger(self, &Event::new(vec![], vec![client_id], vec![]));
+                    let e = Event::new(vec![], vec![client_id], vec![]);
+                    for cb in eh.callbacks() {
+                        cb(self, &e);
+                    }
                 }
             }
             Entry::Vacant(e) => {
                 e.insert(new);
                 if let Some(eh) = self.on_update.as_ref() {
-                    eh.trigger(self, &Event::new(vec![client_id], vec![], vec![]));
+                    let e = Event::new(vec![client_id], vec![], vec![]);
+                    for cb in eh.callbacks() {
+                        cb(self, &e);
+                    }
                 }
             }
         }
@@ -113,10 +118,10 @@ impl Awareness {
         self.update_meta(client_id);
         if let Some(eh) = self.on_update.as_ref() {
             if prev_state.is_some() {
-                eh.trigger(
-                    self,
-                    &Event::new(Vec::default(), Vec::default(), vec![client_id]),
-                );
+                let e = Event::new(Vec::default(), Vec::default(), vec![client_id]);
+                for cb in eh.callbacks() {
+                    cb(self, &e);
+                }
             }
         }
     }
@@ -243,7 +248,10 @@ impl Awareness {
 
         if let Some(eh) = self.on_update.as_ref() {
             if !added.is_empty() || !updated.is_empty() || !removed.is_empty() {
-                eh.trigger(self, &Event::new(added, updated, removed));
+                let e = Event::new(added, updated, removed);
+                for cb in eh.callbacks() {
+                    cb(self, &e);
+                }
             }
         }
 
@@ -267,61 +275,9 @@ impl std::fmt::Debug for Awareness {
     }
 }
 
-struct EventHandler<T> {
-    seq_nr: u32,
-    subscribers: Rc<RefCell<HashMap<u32, Box<dyn Fn(&Awareness, &T) -> ()>>>>,
-}
-
-impl<T> EventHandler<T> {
-    pub fn subscribe<F>(&mut self, f: F) -> Subscription<T>
-    where
-        F: Fn(&Awareness, &T) -> () + 'static,
-    {
-        let subscription_id = self.seq_nr;
-        self.seq_nr += 1;
-        {
-            let func = Box::new(f);
-            let mut subs = self.subscribers.borrow_mut();
-            subs.insert(subscription_id, func);
-        }
-        Subscription {
-            subscription_id,
-            subscribers: Rc::downgrade(&self.subscribers),
-        }
-    }
-
-    pub fn trigger(&self, awareness: &Awareness, arg: &T) {
-        let subs = self.subscribers.borrow();
-        for func in subs.values() {
-            func(awareness, arg);
-        }
-    }
-}
-
-impl<T> Default for EventHandler<T> {
-    fn default() -> Self {
-        EventHandler {
-            seq_nr: 0,
-            subscribers: Rc::new(RefCell::new(HashMap::new())),
-        }
-    }
-}
-
 /// Whenever a new callback is being registered, a [Subscription] is made. Whenever this
 /// subscription a registered callback is cancelled and will not be called any more.
-pub struct Subscription<T> {
-    subscription_id: u32,
-    subscribers: Weak<RefCell<HashMap<u32, Box<dyn Fn(&Awareness, &T) -> ()>>>>,
-}
-
-impl<T> Drop for Subscription<T> {
-    fn drop(&mut self) {
-        if let Some(subs) = self.subscribers.upgrade() {
-            let mut s = subs.borrow_mut();
-            s.remove(&self.subscription_id);
-        }
-    }
-}
+pub type UpdateSubscription = Subscription<Arc<dyn Fn(&Awareness, &Event) -> () + 'static>>;
 
 /// A structure that represents an encodable state of an [Awareness] struct.
 #[derive(Debug, Eq, PartialEq)]
