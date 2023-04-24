@@ -19,7 +19,7 @@ use yrs::UpdateSubscription;
 ///
 /// New receivers can subscribe to a broadcasting group via [BroadcastGroup::subscribe] method.
 pub struct BroadcastGroup {
-    awareness_sub: awareness::Subscription<Event>,
+    awareness_sub: awareness::UpdateSubscription,
     doc_sub: UpdateSubscription,
     awareness_ref: Arc<RwLock<Awareness>>,
     sender: Sender<Vec<u8>>,
