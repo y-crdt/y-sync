@@ -1,8 +1,8 @@
+#![allow(dead_code)]
 use crate::awareness::Awareness;
 use crate::sync::{DefaultProtocol, Error, Message, MessageReader, Protocol, SyncMessage};
 use futures_util::sink::SinkExt;
 use futures_util::StreamExt;
-use lib0::decoding::Cursor;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -11,6 +11,7 @@ use std::task::{Context, Poll};
 use tokio::spawn;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
+use yrs::encoding::read::Cursor;
 use yrs::updates::decoder::{Decode, DecoderV1};
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::Update;
