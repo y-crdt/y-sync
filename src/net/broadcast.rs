@@ -1,15 +1,16 @@
+#![allow(dead_code)]
 use crate::awareness;
-use crate::awareness::{Awareness, Event};
+use crate::awareness::Awareness;
 use crate::net::conn::handle_msg;
 use crate::sync::{DefaultProtocol, Error, Message, Protocol, MSG_SYNC, MSG_SYNC_UPDATE};
 use futures_util::{SinkExt, StreamExt};
-use lib0::encoding::Write;
 use std::sync::Arc;
 use tokio::select;
 use tokio::sync::broadcast::error::SendError;
 use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
+use yrs::encoding::write::Write;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::UpdateSubscription;
@@ -238,7 +239,7 @@ mod test {
     }
 
     fn test_channel(capacity: usize) -> (PollSender<Vec<u8>>, ReceiverStream<Vec<u8>>) {
-        let (s, r) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let (s, r) = tokio::sync::mpsc::channel::<Vec<u8>>(capacity);
         let s = PollSender::new(s);
         let r = ReceiverStream::new(r);
         (s, r)

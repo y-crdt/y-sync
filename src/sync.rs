@@ -1,6 +1,7 @@
 use crate::awareness;
 use crate::awareness::{Awareness, AwarenessUpdate};
 use thiserror::Error;
+use yrs::encoding::read;
 use yrs::updates::decoder::{Decode, Decoder};
 use yrs::updates::encoder::{Encode, Encoder};
 use yrs::{ReadTxn, StateVector, Transact, Update};
@@ -90,7 +91,7 @@ pub trait Protocol {
     /// send back [Error::PermissionDenied].
     fn handle_auth(
         &self,
-        awareness: &Awareness,
+        _awareness: &Awareness,
         deny_reason: Option<String>,
     ) -> Result<Option<Message>, Error> {
         if let Some(reason) = deny_reason {
@@ -122,9 +123,9 @@ pub trait Protocol {
     /// implemented here. By default it returns an [Error::Unsupported].
     fn missing_handle(
         &self,
-        awareness: &mut Awareness,
+        _awareness: &mut Awareness,
         tag: u8,
-        data: Vec<u8>,
+        _data: Vec<u8>,
     ) -> Result<Option<Message>, Error> {
         Err(Error::Unsupported(tag))
     }
@@ -183,7 +184,7 @@ impl Encode for Message {
 }
 
 impl Decode for Message {
-    fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, lib0::error::Error> {
+    fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, read::Error> {
         let tag: u8 = decoder.read_var()?;
         match tag {
             MSG_SYNC => {
@@ -246,7 +247,7 @@ impl Encode for SyncMessage {
 }
 
 impl Decode for SyncMessage {
-    fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, lib0::error::Error> {
+    fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, read::Error> {
         let tag: u8 = decoder.read_var()?;
         match tag {
             MSG_SYNC_STEP_1 => {
@@ -262,7 +263,7 @@ impl Decode for SyncMessage {
                 let buf = decoder.read_buf()?;
                 Ok(SyncMessage::Update(buf.into()))
             }
-            _ => Err(lib0::error::Error::UnexpectedValue),
+            _ => Err(read::Error::UnexpectedValue),
         }
     }
 }
@@ -272,7 +273,7 @@ impl Decode for SyncMessage {
 pub enum Error {
     /// Incoming Y-protocol message couldn't be deserialized.
     #[error("failed to deserialize message: {0}")]
-    DecodingError(#[from] lib0::error::Error),
+    DecodingError(#[from] read::Error),
 
     /// Applying incoming Y-protocol awareness update has failed.
     #[error("failed to process awareness update: {0}")]
@@ -286,6 +287,10 @@ pub enum Error {
     #[error("unsupported message tag identifier: {0}")]
     Unsupported(u8),
 
+    /// Thrown in case of I/O errors.
+    #[error("IO error: {0}")]
+    IO(#[from] std::io::Error),
+
     /// Custom dynamic kind of error, usually related to a warp internal error messages.
     #[error("internal failure: {0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
@@ -295,12 +300,6 @@ pub enum Error {
 impl From<tokio::task::JoinError> for Error {
     fn from(value: tokio::task::JoinError) -> Self {
         Error::Other(value.into())
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(value: std::io::Error) -> Self {
-        Error::DecodingError(lib0::error::Error::IO(value))
     }
 }
 
@@ -316,12 +315,12 @@ impl<'a, D: Decoder> MessageReader<'a, D> {
 }
 
 impl<'a, D: Decoder> Iterator for MessageReader<'a, D> {
-    type Item = Result<Message, lib0::error::Error>;
+    type Item = Result<Message, read::Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match Message::decode(self.0) {
             Ok(msg) => Some(Ok(msg)),
-            Err(lib0::error::Error::EndOfBuffer(_)) => None,
+            Err(read::Error::EndOfBuffer(_)) => None,
             Err(error) => Some(Err(error)),
         }
     }
@@ -331,8 +330,8 @@ impl<'a, D: Decoder> Iterator for MessageReader<'a, D> {
 mod test {
     use crate::awareness::Awareness;
     use crate::sync::*;
-    use lib0::decoding::Cursor;
     use std::collections::HashMap;
+    use yrs::encoding::read::Cursor;
     use yrs::updates::decoder::{Decode, DecoderV1};
     use yrs::updates::encoder::{Encode, EncoderV1};
     use yrs::{Doc, GetString, ReadTxn, StateVector, Text, Transact};
